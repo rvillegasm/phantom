@@ -1,4 +1,4 @@
-mod nes;
+pub mod nes;
 
 #[macro_use]
 extern crate lazy_static;

@@ -51,7 +51,7 @@ pub struct Cpu {
     memory: [u8; 0xFFFF],
 }
 
-trait Memory {
+pub trait Memory {
     fn mem_read(&self, addr: u16) -> u8;
 
     fn mem_write(&mut self, addr: u16, data: u8);
@@ -115,9 +115,18 @@ impl Cpu {
     }
 
     pub fn run(&mut self) {
+        self.run_with_callback(|_| {});
+    }
+
+    pub fn run_with_callback<F>(&mut self, mut callback: F)
+    where
+        F: FnMut(&mut Cpu),
+    {
         let ref opcodes: HashMap<u8, &'static OpCode> = *OPCODES_MAP;
 
         loop {
+            callback(self);
+
             let code = self.mem_read(self.program_counter);
             self.program_counter += 1;
             let program_counter_state = self.program_counter;
@@ -132,9 +141,7 @@ impl Cpu {
                 0x40 => {
                     self.rti();
                 }
-                0x69 | 0x65 | 0x75 | 0x6D | 0x7D | 0x79 | 0x61 | 0x71 => {
-                    self.adc(opcode.mode())
-                }
+                0x69 | 0x65 | 0x75 | 0x6D | 0x7D | 0x79 | 0x61 | 0x71 => self.adc(opcode.mode()),
                 0x29 | 0x25 | 0x35 | 0x2D | 0x3D | 0x39 | 0x21 | 0x31 => {
                     self.and(opcode.mode());
                 }
@@ -502,14 +509,17 @@ impl Cpu {
     }
 
     fn sbc(&mut self, mode: &AddressingMode) {
+        // http://www.6502.org/tutorials/6502opcodes.html#SBC
+        // To subtract you set the carry before the operation.
+        // If the carry is cleared by the operation, it indicates a borrow occurred.
         let addr = self.get_operand_address(mode);
         let mem_value = self.mem_read(addr);
-        self.add_to_register_a(!mem_value + 1); // Two's complement
+        self.add_to_register_a((mem_value as i8).wrapping_neg().wrapping_sub(1) as u8);
     }
 
     fn branch(&mut self, condition: bool) {
         if condition {
-            let jump_amount = self.mem_read(self.program_counter);
+            let jump_amount = self.mem_read(self.program_counter) as i8;
             let jump_addr = self
                 .program_counter
                 .wrapping_add(1)
@@ -1017,8 +1027,9 @@ mod tests {
     #[test]
     fn test_0xe9_sbc_subtract_with_carry() {
         let mut cpu = Cpu::new();
-        cpu.load_and_run(vec![0xA9, 0x00, 0xE9, 0x01, 0x00]);
-        assert_eq!(cpu.register_a, 0xFF);
+        cpu.load_and_run(vec![0xA9, 0x01, 0x38, 0xE9, 0x02, 0x00]);
+        // carry is set before the operation
+        assert_eq!(cpu.register_a as i8, -1);
     }
 
     #[test]
