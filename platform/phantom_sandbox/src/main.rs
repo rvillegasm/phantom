@@ -1,4 +1,5 @@
-use phantom::nes::cpu::{Cpu, Memory};
+use phantom::nes::memory::Memory;
+use phantom::nes::cpu::Cpu;
 
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;

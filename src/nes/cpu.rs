@@ -1,20 +1,23 @@
 /// Implementation of the NES' custom 6502 CPU
+use crate::nes::memory::Memory;
+use crate::nes::bus::Bus;
 use crate::nes::opcodes::{AddressingMode, OpCode, OPCODES_MAP};
 use bitflags::bitflags;
 use std::collections::HashMap;
 
-// Constants
-const ZEROTH_BIT: u8 = 0b00000001;
-const FIRST_BIT: u8 = 0b00000010;
-const SECOND_BIT: u8 = 0b00000100;
-const THIRD_BIT: u8 = 0b00001000;
-const FOURTH_BIT: u8 = 0b00010000;
-const FIFTH_BIT: u8 = 0b00100000;
-const SIXTH_BIT: u8 = 0b01000000;
+const ZEROTH_BIT: u8  = 0b00000001;
+const FIRST_BIT: u8   = 0b00000010;
+const SECOND_BIT: u8  = 0b00000100;
+const THIRD_BIT: u8   = 0b00001000;
+const FOURTH_BIT: u8  = 0b00010000;
+const FIFTH_BIT: u8   = 0b00100000;
+const SIXTH_BIT: u8   = 0b01000000;
 const SEVENTH_BIT: u8 = 0b10000000;
 
-const STACK_START: u16 = 0x0100;
-const STACK_RESET: u8 = 0xFD;
+const PROGRAM_ROM_START_ADDR: u16 = 0x8000;
+
+const STACK_START_ADDR: u16 = 0x0100;
+const STACK_RESET_ADDR: u8 = 0xFD;
 
 bitflags! {
     /// # Status Register (P) http://wiki.nesdev.com/w/index.php/Status_flags
@@ -48,35 +51,24 @@ pub struct Cpu {
     status: CpuFlags,
     program_counter: u16,
     stack_pointer: u8,
-    memory: [u8; 0xFFFF],
-}
-
-pub trait Memory {
-    fn mem_read(&self, addr: u16) -> u8;
-
-    fn mem_write(&mut self, addr: u16, data: u8);
-
-    fn mem_read_u16(&self, pos: u16) -> u16 {
-        let lo = self.mem_read(pos) as u16;
-        let hi = self.mem_read(pos + 1) as u16;
-        (hi << 8) | (lo as u16)
-    }
-
-    fn mem_write_u16(&mut self, pos: u16, data: u16) {
-        let hi = (data >> 8) as u8;
-        let lo = (data & 0xff) as u8;
-        self.mem_write(pos, lo);
-        self.mem_write(pos + 1, hi);
-    }
+    bus: Bus,
 }
 
 impl Memory for Cpu {
     fn mem_read(&self, addr: u16) -> u8 {
-        self.memory[addr as usize]
+        self.bus.mem_read(addr)
     }
 
     fn mem_write(&mut self, addr: u16, data: u8) {
-        self.memory[addr as usize] = data;
+        self.bus.mem_write(addr, data);
+    }
+
+    fn mem_read_u16(&self, addr: u16) -> u16 {
+        self.bus.mem_read_u16(addr)
+    }
+
+    fn mem_write_u16(&mut self, addr: u16, data: u16) {
+        self.bus.mem_write_u16(addr, data);
     }
 }
 
@@ -88,8 +80,8 @@ impl Cpu {
             register_y: 0,
             status: CpuFlags::from_bits_truncate(0b100100),
             program_counter: 0,
-            stack_pointer: STACK_RESET,
-            memory: [0; 0xFFFF],
+            stack_pointer: STACK_RESET_ADDR,
+            bus: Bus::new(),
         }
     }
 
@@ -104,14 +96,16 @@ impl Cpu {
         self.register_x = 0;
         self.register_y = 0;
         self.status = CpuFlags::from_bits_truncate(0b100100);
-        self.stack_pointer = STACK_RESET;
+        self.stack_pointer = STACK_RESET_ADDR;
 
         self.program_counter = self.mem_read_u16(0xFFFC);
     }
 
     pub fn load(&mut self, program: Vec<u8>) {
-        self.memory[0x8000..(0x8000 + program.len())].copy_from_slice(&program[..]);
-        self.mem_write_u16(0xFFFC, 0x8000);
+        for i in 0..(program.len() as u16) {
+            self.mem_write(PROGRAM_ROM_START_ADDR + i, program[i as usize]);
+        }
+        self.mem_write_u16(0xFFFC, PROGRAM_ROM_START_ADDR);
     }
 
     pub fn run(&mut self) {
@@ -667,13 +661,13 @@ impl Cpu {
     }
 
     fn stack_push(&mut self, data: u8) {
-        self.mem_write(STACK_START + (self.stack_pointer as u16), data);
+        self.mem_write(STACK_START_ADDR + (self.stack_pointer as u16), data);
         self.stack_pointer = self.stack_pointer.wrapping_sub(1);
     }
 
     fn stack_pop(&mut self) -> u8 {
         self.stack_pointer = self.stack_pointer.wrapping_add(1);
-        self.mem_read(STACK_START + (self.stack_pointer as u16))
+        self.mem_read(STACK_START_ADDR + (self.stack_pointer as u16))
     }
 
     fn stack_push_u16(&mut self, data: u16) {
