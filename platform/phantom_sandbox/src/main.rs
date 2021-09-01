@@ -1,3 +1,7 @@
+mod tracing;
+
+use tracing::trace;
+
 use phantom::nes::memory::Memory;
 use phantom::nes::cpu::Cpu;
 use phantom::nes::bus::Bus;
@@ -34,28 +38,30 @@ fn main() {
         .unwrap();
 
     // Load game
-    let raw_rom = std::fs::read("snake.nes").unwrap();
-    println!("Opened file snake.nes");
+    let raw_rom = std::fs::read("nestest.nes").unwrap();
+    // println!("Opened file snake.nes");
     let rom = Rom::new(&raw_rom).unwrap();
 
     let bus = Bus::new(rom);
     let mut cpu = Cpu::new(bus);
     cpu.reset();
+    cpu.set_program_counter(0xC000);
 
-    let mut screen_state = [0 as u8; 32 * 3 * 32];
-    let mut rng = rand::thread_rng();
+    // let mut screen_state = [0 as u8; 32 * 3 * 32];
+    // let mut rng = rand::thread_rng();
 
     cpu.run_with_callback(move |cpu| {
-        handle_user_input(cpu, &mut event_pump);
-        cpu.mem_write(0xFE, rng.gen_range(1..16));
-
-        if read_screen_state(cpu, &mut screen_state) {
-            texture.update(None, &screen_state, 32 * 3).unwrap();
-            canvas.copy(&texture, None, None).unwrap();
-            canvas.present();
-        }
-
-        ::std::thread::sleep(std::time::Duration::new(0, 70_000));
+        println!("{}", trace(cpu));
+        // handle_user_input(cpu, &mut event_pump);
+        // cpu.mem_write(0xFE, rng.gen_range(1..16));
+        //
+        // if read_screen_state(cpu, &mut screen_state) {
+        //     texture.update(None, &screen_state, 32 * 3).unwrap();
+        //     canvas.copy(&texture, None, None).unwrap();
+        //     canvas.present();
+        // }
+        //
+        // ::std::thread::sleep(std::time::Duration::new(0, 70_000));
     });
 
     fn handle_user_input(cpu: &mut Cpu, event_pump: &mut EventPump) {
