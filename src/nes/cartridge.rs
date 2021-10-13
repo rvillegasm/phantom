@@ -10,10 +10,10 @@ pub enum MirroringMode {
 }
 
 pub struct Rom {
-    prg_rom: Vec<u8>,
-    chr_rom: Vec<u8>,
-    mapper: u8,
-    screen_mirroring: MirroringMode,
+    pub prg_rom: Vec<u8>,
+    pub chr_rom: Vec<u8>,
+    pub mapper: u8,
+    pub screen_mirroring: MirroringMode,
 }
 
 impl Rom {
@@ -50,10 +50,6 @@ impl Rom {
             mapper,
             screen_mirroring,
         })
-    }
-
-    pub fn prg_rom(&self) -> &Vec<u8> {
-        &self.prg_rom
     }
 }
 

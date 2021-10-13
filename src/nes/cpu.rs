@@ -2,6 +2,7 @@ use crate::nes::bus::Bus;
 /// Implementation of the NES' custom 6502 CPU
 use crate::nes::memory::Memory;
 use crate::nes::opcodes::{AddressingMode, OpCode, OPCODES_MAP};
+use crate::nes::interrupt;
 use bitflags::bitflags;
 use std::collections::HashMap;
 
@@ -44,18 +45,18 @@ bitflags! {
     }
 }
 
-pub struct Cpu {
+pub struct Cpu<'a> {
     register_a: u8,
     register_x: u8,
     register_y: u8,
     status: CpuFlags,
     program_counter: u16,
     stack_pointer: u8,
-    bus: Bus,
+    bus: Bus<'a>,
 }
 
-impl Memory for Cpu {
-    fn mem_read(&self, addr: u16) -> u8 {
+impl Memory for Cpu<'_> {
+    fn mem_read(&mut self, addr: u16) -> u8 {
         self.bus.mem_read(addr)
     }
 
@@ -63,7 +64,7 @@ impl Memory for Cpu {
         self.bus.mem_write(addr, data);
     }
 
-    fn mem_read_u16(&self, addr: u16) -> u16 {
+    fn mem_read_u16(&mut self, addr: u16) -> u16 {
         self.bus.mem_read_u16(addr)
     }
 
@@ -72,8 +73,8 @@ impl Memory for Cpu {
     }
 }
 
-impl Cpu {
-    pub fn new(bus: Bus) -> Self {
+impl<'a> Cpu<'a> {
+    pub fn new<'b>(bus: Bus<'b>) -> Cpu<'b> {
         Cpu {
             register_a: 0,
             register_x: 0,
@@ -121,6 +122,10 @@ impl Cpu {
         let ref opcodes: HashMap<u8, &'static OpCode> = *OPCODES_MAP;
 
         loop {
+            if let Some(nmi) = self.bus.poll_nmi_status() {
+                self.manage_interrupt(interrupt::NMI);
+            }
+
             callback(self);
 
             let code = self.mem_read(self.program_counter);
@@ -342,8 +347,11 @@ impl Cpu {
                 0x04 | 0x44 | 0x64 | 0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 | 0x0C | 0x1C
                 | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => {
                     // NOP read
-                    let addr = self.get_operand_address(opcode.mode());
+                    let (addr, page_cross) = self.compute_operand_address(opcode.mode());
                     let _mem_value = self.mem_read(addr);
+                    if page_cross {
+                        self.bus.tick(1);
+                    }
                 }
                 0x67 | 0x77 | 0x6F | 0x7F | 0x7B | 0x63 | 0x73 => {
                     self.rra(opcode.mode());
@@ -390,6 +398,8 @@ impl Cpu {
                 }
             }
 
+            self.bus.tick(opcode.cycles());
+
             if program_counter_state == self.program_counter {
                 self.program_counter += (opcode.len() - 1) as u16;
             }
@@ -405,19 +415,27 @@ impl Cpu {
     }
 
     fn adc(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, page_cross) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         self.add_to_register_a(mem_value);
+
+        if page_cross {
+            self.bus.tick(1);
+        }
     }
 
     fn and(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, page_cross) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         self.set_register_a(mem_value & self.register_a);
+
+        if page_cross {
+            self.bus.tick(1);
+        }
     }
 
     fn asl(&mut self, mode: &AddressingMode) -> u8 {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mut mem_value = self.mem_read(addr);
 
         let carry_val = SEVENTH_BIT & mem_value;
@@ -445,7 +463,7 @@ impl Cpu {
     }
 
     fn bit(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         let and_val = mem_value & self.register_a;
 
@@ -462,7 +480,7 @@ impl Cpu {
     }
 
     fn compare(&mut self, mode: &AddressingMode, val_to_compare: u8) {
-        let addr = self.get_operand_address(mode);
+        let (addr, page_cross) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
 
         if val_to_compare >= mem_value {
@@ -474,10 +492,14 @@ impl Cpu {
         let subtracted_val = val_to_compare.wrapping_sub(mem_value);
         self.update_zero_flag(subtracted_val);
         self.update_negative_flag(subtracted_val);
+
+        if page_cross {
+            self.bus.tick(1);
+        }
     }
 
     fn dec(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mut mem_value = self.mem_read(addr);
         mem_value = mem_value.wrapping_sub(1);
         self.mem_write(addr, mem_value);
@@ -486,13 +508,17 @@ impl Cpu {
     }
 
     fn eor(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, page_cross) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         self.set_register_a(self.register_a ^ mem_value);
+
+        if page_cross {
+            self.bus.tick(1);
+        }
     }
 
     fn lsr(&mut self, mode: &AddressingMode) -> u8 {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mut mem_value = self.mem_read(addr);
 
         if mem_value & ZEROTH_BIT == 1 {
@@ -519,14 +545,19 @@ impl Cpu {
     }
 
     fn ora(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, page_cross) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         self.set_register_a(self.register_a | mem_value);
+
+        if page_cross {
+            self.bus.tick(1);
+        }
     }
 
     fn rol(&mut self, mode: &AddressingMode) -> u8 {
-        let addr = self.get_operand_address(mode);
-        let result = self.rol_internal(self.mem_read(addr));
+        let (addr, _) = self.compute_operand_address(mode);
+        let mem_value = self.mem_read(addr);
+        let result = self.rol_internal(mem_value);
         self.mem_write(addr, result);
         self.update_zero_flag(result);
         self.update_negative_flag(result);
@@ -555,8 +586,9 @@ impl Cpu {
     }
 
     fn ror(&mut self, mode: &AddressingMode) -> u8 {
-        let addr = self.get_operand_address(mode);
-        let result = self.ror_internal(self.mem_read(addr));
+        let (addr, _) = self.compute_operand_address(mode);
+        let mem_value = self.mem_read(addr);
+        let result = self.ror_internal(mem_value);
         self.mem_write(addr, result);
         self.update_zero_flag(result);
         self.update_negative_flag(result);
@@ -588,18 +620,28 @@ impl Cpu {
         // http://www.6502.org/tutorials/6502opcodes.html#SBC
         // To subtract you set the carry before the operation.
         // If the carry is cleared by the operation, it indicates a borrow occurred.
-        let addr = self.get_operand_address(mode);
+        let (addr, page_cross) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         self.sub_to_register_a(mem_value);
+
+        if page_cross {
+            self.bus.tick(1);
+        }
     }
 
     fn branch(&mut self, condition: bool) {
         if condition {
+            self.bus.tick(1);
+
             let jump_amount = self.mem_read(self.program_counter) as i8;
             let jump_addr = self
                 .program_counter
                 .wrapping_add(1)
                 .wrapping_add(jump_amount as u16); // Relative jumping
+
+            if self.page_cross(self.program_counter.wrapping_add(1), jump_addr) {
+                self.bus.tick(1);
+            }
 
             self.program_counter = jump_addr;
         }
@@ -646,7 +688,7 @@ impl Cpu {
     }
 
     fn inc(&mut self, mode: &AddressingMode) -> u8 {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mut mem_value = self.mem_read(addr);
         mem_value = mem_value.wrapping_add(1);
         self.mem_write(addr, mem_value);
@@ -664,35 +706,47 @@ impl Cpu {
     }
 
     fn lda(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, page_cross) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         self.set_register_a(mem_value);
+
+        if page_cross {
+            self.bus.tick(1);
+        }
     }
 
     fn ldx(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, page_cross) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         self.set_register_x(mem_value);
+
+        if page_cross {
+            self.bus.tick(1);
+        }
     }
 
     fn ldy(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, page_cross) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         self.set_register_y(mem_value);
+
+        if page_cross {
+            self.bus.tick(1);
+        }
     }
 
     fn sta(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         self.mem_write(addr, self.register_a);
     }
 
     fn stx(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         self.mem_write(addr, self.register_x);
     }
 
     fn sty(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         self.mem_write(addr, self.register_y);
     }
 
@@ -744,7 +798,7 @@ impl Cpu {
     }
 
     fn dcp(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mut mem_value = self.mem_read(addr);
         mem_value = mem_value.wrapping_sub(1);
         self.mem_write(addr, mem_value);
@@ -772,7 +826,7 @@ impl Cpu {
     }
 
     fn axs(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         let x_and_a_val = self.register_x & self.register_a;
         let result = x_and_a_val.wrapping_sub(mem_value);
@@ -785,7 +839,7 @@ impl Cpu {
     }
 
     fn arr(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
 
         self.and_with_register_a(mem_value);
@@ -808,13 +862,13 @@ impl Cpu {
     }
 
     fn sbc_unofficial(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         self.sub_to_register_a(mem_value);
     }
 
     fn anc(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         self.and_with_register_a(mem_value);
 
@@ -826,7 +880,7 @@ impl Cpu {
     }
 
     fn alr(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
 
         self.and_with_register_a(mem_value);
@@ -850,13 +904,13 @@ impl Cpu {
 
     fn xaa(&mut self, mode: &AddressingMode) {
         self.set_register_a(self.register_x);
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         self.and_with_register_a(mem_value);
     }
 
     fn las(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mut mem_value = self.mem_read(addr);
         mem_value &= self.stack_pointer;
         self.register_a = mem_value; // Code repetition to avoid unnecessary multiple flag updates
@@ -868,38 +922,38 @@ impl Cpu {
 
     fn tas(&mut self, mode: &AddressingMode) {
         self.stack_pointer = self.register_a & self.register_x;
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let result = ((addr >> 8) as u8 + 1) & self.stack_pointer;
         self.mem_write(addr, result);
     }
 
     fn ahx(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let result = self.register_a & self.register_x & (addr >> 8) as u8;
         self.mem_write(addr, result);
     }
 
     fn shx(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let result = self.register_x & ((addr >> 8) as u8 + 1);
         self.mem_write(addr, result);
     }
 
     fn shy(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let result = self.register_y & ((addr >> 8) as u8 + 1);
         self.mem_write(addr, result);
     }
 
     fn lax(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         let mem_value = self.mem_read(addr);
         self.set_register_a(mem_value);
         self.register_x = mem_value;
     }
 
     fn sax(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let (addr, _) = self.compute_operand_address(mode);
         self.mem_write(addr, self.register_a & self.register_x);
     }
 
@@ -1038,36 +1092,36 @@ impl Cpu {
         self.status.remove(CpuFlags::OVERFLOW);
     }
 
-    fn get_operand_address(&self, mode: &AddressingMode) -> u16 {
+    fn compute_operand_address(&mut self, mode: &AddressingMode) -> (u16, bool) {
         match mode {
-            AddressingMode::Immediate => self.program_counter,
-            _ => self.get_real_address(mode, self.program_counter),
+            AddressingMode::Immediate => (self.program_counter, false),
+            _ => self.compute_real_address(mode, self.program_counter),
         }
     }
 
-    pub fn get_real_address(&self, mode: &AddressingMode, addr: u16) -> u16 {
+    pub fn compute_real_address(&mut self, mode: &AddressingMode, addr: u16) -> (u16, bool) {
         match mode {
-            AddressingMode::ZeroPage => self.mem_read(addr) as u16,
+            AddressingMode::ZeroPage => (self.mem_read(addr) as u16, false),
             AddressingMode::ZeroPageX => {
                 let pos = self.mem_read(addr);
                 let addr = pos.wrapping_add(self.register_x) as u16;
-                addr
+                (addr, false)
             }
             AddressingMode::ZeroPageY => {
                 let pos = self.mem_read(addr);
                 let addr = pos.wrapping_add(self.register_y) as u16;
-                addr
+                (addr, false)
             }
-            AddressingMode::Absolute => self.mem_read_u16(addr),
+            AddressingMode::Absolute => (self.mem_read_u16(addr), false),
             AddressingMode::AbsoluteX => {
                 let base = self.mem_read_u16(addr);
                 let addr = base.wrapping_add(self.register_x as u16);
-                addr
+                (addr, self.page_cross(base, addr))
             }
             AddressingMode::AbsoluteY => {
                 let base = self.mem_read_u16(addr);
                 let addr = base.wrapping_add(self.register_y as u16);
-                addr
+                (addr, self.page_cross(base, addr))
             }
             AddressingMode::IndirectX => {
                 let base = self.mem_read(addr);
@@ -1075,7 +1129,7 @@ impl Cpu {
                 let ptr = base.wrapping_add(self.register_x);
                 let lo = self.mem_read(ptr as u16);
                 let hi = self.mem_read(ptr.wrapping_add(1) as u16);
-                (hi as u16) << 8 | (lo as u16)
+                ((hi as u16) << 8 | (lo as u16), false)
             }
             AddressingMode::IndirectY => {
                 let base = self.mem_read(addr);
@@ -1084,12 +1138,29 @@ impl Cpu {
                 let hi = self.mem_read((base as u8).wrapping_add(1) as u16);
                 let deref_base = (hi as u16) << 8 | (lo as u16);
                 let deref = deref_base.wrapping_add(self.register_y as u16);
-                deref
+                (deref, self.page_cross(deref, deref_base))
             }
             _ => {
                 panic!("Memory addressing mode {:?} is not supported", mode);
             }
         }
+    }
+
+    fn page_cross(&self, addr1: u16, addr2: u16) -> bool {
+        addr1 & 0xFF00 != addr2 & 0xFF00
+    }
+
+    fn manage_interrupt(&mut self, interrupt: interrupt::Interrupt) {
+        self.stack_push_u16(self.program_counter);
+        let mut status_flags = self.status.clone();
+        status_flags.set(CpuFlags::BREAK, interrupt.b_flag_mask & FOURTH_BIT == 1);
+        status_flags.set(CpuFlags::BREAK2, interrupt.b_flag_mask & FIFTH_BIT == 1);
+
+        self.stack_push(status_flags.bits());
+        self.status.insert(CpuFlags::INTERRUPT_DISABLE);
+
+        self.bus.tick(interrupt.cpu_cycles);
+        self.program_counter = self.mem_read_u16(interrupt.vec_addr);
     }
 
     pub fn program_counter(&self) -> u16 {
@@ -1115,22 +1186,18 @@ impl Cpu {
     pub fn stack_pointer(&self) -> u8 {
         self.stack_pointer
     }
-
-    #[deprecated = "Remove after testing tracing"]
-    pub fn set_program_counter(&mut self, program_counter: u16) {
-        self.program_counter = program_counter;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::nes::cartridge::tests;
+    use crate::nes::ppu::Ppu;
 
     #[test]
     fn test_0xa9_lda_immediate_load_data() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x05, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1142,7 +1209,7 @@ mod tests {
     #[test]
     fn test_0xa9_lda_zero_flag() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x00, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1152,7 +1219,7 @@ mod tests {
     #[test]
     fn test_0xa9_lda_negative_flag() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0xFF, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1162,7 +1229,7 @@ mod tests {
     #[test]
     fn test_lda_zero_page() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA5, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x55);
         cpu.reset();
@@ -1174,7 +1241,7 @@ mod tests {
     fn test_lda_zero_page_x() {
         let rom =
             tests::create_simple_test_rom_with_data(vec![0xA9, 0x0F, 0xAA, 0xB5, 0x80, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x8F, 0x55);
         cpu.reset();
@@ -1185,7 +1252,7 @@ mod tests {
     #[test]
     fn test_lda_absolute() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xAD, 0x8F, 0x00, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x008F, 0x55);
         cpu.reset();
@@ -1199,7 +1266,7 @@ mod tests {
             vec![0xA9, 0x0F, 0xAA, 0xBD, 0x80, 0x00, 0x00],
             None,
         );
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x008F, 0x55);
         cpu.reset();
@@ -1213,7 +1280,7 @@ mod tests {
             vec![0xA9, 0x0F, 0xAA, 0xA1, 0x80, 0x00, 0x00],
             None,
         );
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x008F, 0x55);
         cpu.mem_write(0x0055, 0x0A);
@@ -1225,7 +1292,7 @@ mod tests {
     #[test]
     fn test_0x69_adc_add_with_carry() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x01, 0x69, 0x01, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1235,7 +1302,7 @@ mod tests {
     #[test]
     fn test_0x69_adc_add_with_carry_overflow() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x7F, 0x69, 0x7F, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1246,7 +1313,7 @@ mod tests {
     #[test]
     fn test_0x29_and_logical_and() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x99, 0x29, 0x91, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1256,7 +1323,7 @@ mod tests {
     #[test]
     fn test_0x06_asl_arithmetic_shift_left() {
         let rom = tests::create_simple_test_rom_with_data(vec![0x06, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x02);
         cpu.reset();
@@ -1267,7 +1334,7 @@ mod tests {
     #[test]
     fn test_0x0a_asl_arithmetic_shift_left_accumulator() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x01, 0x0A, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1277,7 +1344,7 @@ mod tests {
     #[test]
     fn test_0x24_bit_bit_test() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x01, 0x24, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x01);
         cpu.reset();
@@ -1288,7 +1355,7 @@ mod tests {
     #[test]
     fn test_0xc9_cmp_compare() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x01, 0xC9, 0x01, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1298,7 +1365,7 @@ mod tests {
     #[test]
     fn test_0xc6_dec_decrement_memory() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x01, 0xC6, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x01);
         cpu.reset();
@@ -1309,7 +1376,7 @@ mod tests {
     #[test]
     fn test_0x49_eor_exclusive_or() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x01, 0x49, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1319,7 +1386,7 @@ mod tests {
     #[test]
     fn test_0x46_lsr_logical_shift_left() {
         let rom = tests::create_simple_test_rom_with_data(vec![0x46, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x10);
         cpu.reset();
@@ -1330,7 +1397,7 @@ mod tests {
     #[test]
     fn test_0x4a_lsr_logical_shift_left_accumulator() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x10, 0x4A, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1340,7 +1407,7 @@ mod tests {
     #[test]
     fn test_0x09_ora_logical_inclusive_or() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x10, 0x09, 0x0F, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1350,7 +1417,7 @@ mod tests {
     #[test]
     fn test_0x26_rol_rotate_left() {
         let rom = tests::create_simple_test_rom_with_data(vec![0x26, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x80);
         cpu.reset();
@@ -1362,7 +1429,7 @@ mod tests {
     #[test]
     fn test_0x2a_rol_rotate_left_accumulator() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x80, 0x2A, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1373,7 +1440,7 @@ mod tests {
     #[test]
     fn test_0x66_ror_rotate_right() {
         let rom = tests::create_simple_test_rom_with_data(vec![0x66, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x01);
         cpu.reset();
@@ -1385,7 +1452,7 @@ mod tests {
     #[test]
     fn test_0x6a_ror_rotate_right_accumulator() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x80, 0x6A, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1397,7 +1464,7 @@ mod tests {
         // carry is set before the operation
         let rom =
             tests::create_simple_test_rom_with_data(vec![0xA9, 0x01, 0x38, 0xE9, 0x02, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1410,7 +1477,7 @@ mod tests {
             vec![0xA9, 0x01, 0x10, 0x02, 0xA9, 0xFF, 0xA9, 0x00, 0x00],
             None,
         );
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1420,7 +1487,7 @@ mod tests {
     #[test]
     fn test_0xca_dex_decrement_x() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x01, 0xAA, 0xCA, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1431,7 +1498,7 @@ mod tests {
     #[test]
     fn test_0x88_dey_decrement_y() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x02, 0xA8, 0x88, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1442,7 +1509,7 @@ mod tests {
     #[test]
     fn test_0xe6_inc_increment_memory() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xE6, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x01);
         cpu.reset();
@@ -1453,7 +1520,7 @@ mod tests {
     #[test]
     fn test_0xe8_inx_increment_x() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x0A, 0xAA, 0xE8, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1464,7 +1531,7 @@ mod tests {
     fn test_0xe8_inx_increment_x_overflow() {
         let rom =
             tests::create_simple_test_rom_with_data(vec![0xA9, 0xFF, 0xAA, 0xE8, 0xE8, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1474,7 +1541,7 @@ mod tests {
     #[test]
     fn test_0xe8_inx_increment_x_zero_flag() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0xFF, 0xAA, 0xE8, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1484,7 +1551,7 @@ mod tests {
     #[test]
     fn test_0xe8_inx_increment_x_negative_flag() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0xFE, 0xAA, 0xE8, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1494,7 +1561,7 @@ mod tests {
     #[test]
     fn test_0xc8_iny_increment_y() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x0A, 0xA8, 0xC8, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1504,7 +1571,7 @@ mod tests {
     #[test]
     fn test_0xa2_ldx_load_register_x() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA2, 0x0A, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1514,7 +1581,7 @@ mod tests {
     #[test]
     fn test_0xa0_ldy_load_register_y() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA0, 0x0A, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1524,7 +1591,7 @@ mod tests {
     #[test]
     fn test_0x85_sta_store_register_a() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x0A, 0x85, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1534,7 +1601,7 @@ mod tests {
     #[test]
     fn test_0x86_stx_store_register_x() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA2, 0x0A, 0x86, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1544,7 +1611,7 @@ mod tests {
     #[test]
     fn test_0x84_sty_store_register_y() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA0, 0x0A, 0x84, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1554,7 +1621,7 @@ mod tests {
     #[test]
     fn test_0xaa_tax_move_a_to_x() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x0A, 0xAA, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1564,7 +1631,7 @@ mod tests {
     #[test]
     fn test_0xaa_tax_move_a_to_x_zero_flag() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x00, 0xAA, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1574,7 +1641,7 @@ mod tests {
     #[test]
     fn test_0xaa_tax_move_a_to_x_negative_flag() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0xFF, 0xAA, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1584,7 +1651,7 @@ mod tests {
     #[test]
     fn test_0xa8_tay_move_a_to_y() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x0A, 0xA8, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1594,7 +1661,7 @@ mod tests {
     #[test]
     fn test_0x8a_txa_move_x_to_a() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA2, 0x0A, 0x8A, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1604,7 +1671,7 @@ mod tests {
     #[test]
     fn test_0x98_tya_move_y_to_a() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA0, 0x0A, 0x98, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1614,7 +1681,7 @@ mod tests {
     #[test]
     fn test_0xc7_dcp_unofficial() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xC7, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x01);
         cpu.reset();
@@ -1625,7 +1692,7 @@ mod tests {
     #[test]
     fn test_0x27_rla_unofficial() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0xFF, 0x27, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x01);
         cpu.reset();
@@ -1636,7 +1703,7 @@ mod tests {
     #[test]
     fn test_0x07_slo_unofficial() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x00, 0x07, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x01);
         cpu.reset();
@@ -1647,7 +1714,7 @@ mod tests {
     #[test]
     fn test_0x47_sre_unofficial() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0xFF, 0x47, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x02);
         cpu.reset();
@@ -1661,7 +1728,7 @@ mod tests {
             vec![0xA9, 0xFF, 0xA2, 0x0F, 0xCB, 0x02, 0x00],
             None,
         );
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1671,7 +1738,7 @@ mod tests {
     #[test]
     fn test_0x6b_arr_unofficial() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0xFE, 0x6B, 0x0F, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1684,7 +1751,7 @@ mod tests {
     fn test_0xeb_sbc_unofficial() {
         let rom =
             tests::create_simple_test_rom_with_data(vec![0xA9, 0x02, 0x38, 0xEB, 0x01, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1694,7 +1761,7 @@ mod tests {
     #[test]
     fn test_0x0b_anc_unofficial() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0xF2, 0x0B, 0xF1, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1705,7 +1772,7 @@ mod tests {
     #[test]
     fn test_0x4b_alr_unofficial() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0xF2, 0x4B, 0xF1, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();
@@ -1715,7 +1782,7 @@ mod tests {
     #[test]
     fn test_0x67_rra_unofficial() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA9, 0x01, 0x67, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x10);
         cpu.reset();
@@ -1728,7 +1795,7 @@ mod tests {
     fn test_0xe7_isb_unofficial() {
         let rom =
             tests::create_simple_test_rom_with_data(vec![0xA9, 0x02, 0x38, 0xE7, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x01);
         cpu.reset();
@@ -1740,7 +1807,7 @@ mod tests {
     #[test]
     fn test_0xa7_lax_unofficial() {
         let rom = tests::create_simple_test_rom_with_data(vec![0xA7, 0x10, 0x00], None);
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.mem_write(0x10, 0x01);
         cpu.reset();
@@ -1755,7 +1822,7 @@ mod tests {
             vec![0xA9, 0xFF, 0xA2, 0xFE, 0x87, 0x10, 0x00],
             None,
         );
-        let bus = Bus::new(rom);
+        let bus = Bus::new(rom, |ppu: &Ppu| {});
         let mut cpu = Cpu::new(bus);
         cpu.reset();
         cpu.run();

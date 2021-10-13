@@ -3,3 +3,6 @@ Cargo.lock
 
 .idea
 /platform/phantom_sandbox/target/
+
+*.nes
+*.log

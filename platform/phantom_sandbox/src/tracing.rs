@@ -3,7 +3,7 @@ use phantom::nes::memory::Memory;
 use phantom::nes::opcodes::{AddressingMode, OpCode, OPCODES_MAP};
 use std::collections::HashMap;
 
-pub fn trace(cpu: &Cpu) -> String {
+pub fn trace(cpu: &mut Cpu) -> String {
     let ref opcodes: HashMap<u8, &'static OpCode> = *OPCODES_MAP;
 
     let code = cpu.mem_read(cpu.program_counter());
@@ -16,8 +16,8 @@ pub fn trace(cpu: &Cpu) -> String {
     let (mem_addr, stored_value) = match op.mode() {
         AddressingMode::Immediate | AddressingMode::NoneAddressing => (0, 0),
         _ => {
-            let addr = cpu.get_real_address(&op.mode(), start + 1);
-            (addr, cpu.mem_read(addr))
+            let addr = cpu.compute_real_address(&op.mode(), start + 1);
+            (addr.0, cpu.mem_read(addr.0))
         }
     };
 

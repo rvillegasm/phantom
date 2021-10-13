@@ -41,20 +41,24 @@ impl OpCode {
         }
     }
 
-    pub fn len(&self) -> u8 {
-        self.len
-    }
-
-    pub fn mode(&self) -> &AddressingMode {
-        &self.mode
-    }
-
     pub fn code(&self) -> u8 {
         self.code
     }
 
     pub fn mnemonic(&self) -> &'static str {
         self.mnemonic
+    }
+
+    pub fn len(&self) -> u8 {
+        self.len
+    }
+
+    pub fn cycles(&self) -> u8 {
+        self.cycles
+    }
+
+    pub fn mode(&self) -> &AddressingMode {
+        &self.mode
     }
 }
 
