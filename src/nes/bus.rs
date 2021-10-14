@@ -1,5 +1,6 @@
 /// Implementation of the NES' Bus that connects the CPU, PPU and memory together
 use crate::nes::cartridge::Rom;
+use crate::nes::joypad::Joypad;
 use crate::nes::memory::Memory;
 use crate::nes::ppu::Ppu;
 
@@ -25,13 +26,18 @@ const PPU_MIRROR_MASK: u16 = 0b00100000_00000111;
 const PRG_ROM_START_ADDR: u16 = 0x8000;
 const PRG_ROM_END_ADDR: u16 = 0xFFFF;
 
+const JOYPAD1_ADDR: u16 = 0x4016;
+const JOYPAD2_ADDR: u16 = 0x4017;
+
 pub struct Bus<'call> {
     cpu_ram: [u8; 2048],
     prg_rom: Vec<u8>,
     ppu: Ppu,
 
     cycles: usize,
-    game_loop_callback: Box<dyn FnMut(&Ppu) + 'call>,
+
+    game_loop_callback: Box<dyn FnMut(&Ppu, &mut Joypad) + 'call>,
+    joypad1: Joypad,
 }
 
 impl Memory for Bus<'_> {
@@ -41,6 +47,7 @@ impl Memory for Bus<'_> {
                 let mirrored_addr = addr & RAM_MIRROR_MASK;
                 self.cpu_ram[mirrored_addr as usize]
             }
+            JOYPAD1_ADDR => self.joypad1.read(),
             PPU_CTRL_REGISTER
             | PPU_MASK_REGISTER
             | PPU_OAM_ADDR_REGISTER
@@ -76,6 +83,7 @@ impl Memory for Bus<'_> {
                 let mirrored_addr = addr & RAM_MIRROR_MASK;
                 self.cpu_ram[mirrored_addr as usize] = data;
             }
+            JOYPAD1_ADDR => self.joypad1.write(data),
             PPU_CTRL_REGISTER => {
                 self.ppu.write_to_control_register(data);
             }
@@ -128,8 +136,8 @@ impl Memory for Bus<'_> {
 
 impl<'a> Bus<'a> {
     pub fn new<'call, F>(rom: Rom, game_loop_callback: F) -> Bus<'call>
-    where
-        F: FnMut(&Ppu) + 'call
+        where
+            F: FnMut(&Ppu, &mut Joypad) + 'call
     {
         Bus {
             cpu_ram: [0; 2048],
@@ -137,6 +145,7 @@ impl<'a> Bus<'a> {
             ppu: Ppu::new(rom.chr_rom, rom.screen_mirroring),
             cycles: 0,
             game_loop_callback: Box::from(game_loop_callback),
+            joypad1: Joypad::new(),
         }
     }
 
@@ -146,7 +155,7 @@ impl<'a> Bus<'a> {
         self.cycles += cycles as usize;
         let generate_new_frame = self.ppu.tick(cycles * 3);
         if generate_new_frame {
-            (self.game_loop_callback)(&self.ppu);
+            (self.game_loop_callback)(&self.ppu, &mut self.joypad1);
         }
     }
 
@@ -170,14 +179,14 @@ mod tests {
 
     #[test]
     fn test_bus_mem_read_ram() {
-        let mut bus = Bus::new(tests::create_simple_test_rom(), |ppu: &Ppu| {});
+        let mut bus = Bus::new(tests::create_simple_test_rom(), |_ppu: &Ppu, _joypad: &mut Joypad| {});
         bus.cpu_ram[0x00] = 0xFF;
         assert_eq!(bus.mem_read(0x00), 0xFF);
     }
 
     #[test]
     fn test_bus_mem_write_ram() {
-        let mut bus = Bus::new(tests::create_simple_test_rom(), |ppu: &Ppu| {});
+        let mut bus = Bus::new(tests::create_simple_test_rom(), |_ppu: &Ppu, _joypad: &mut Joypad| {});
         bus.mem_write(0x00, 0xFF);
         assert_eq!(bus.mem_read(0x00), 0xFF);
     }
@@ -185,7 +194,7 @@ mod tests {
     #[test]
     fn test_bus_ram_mirroring() {
         // 0x0800 is mirrored into 0x00, 0x1000 and 0x1800
-        let mut bus = Bus::new(tests::create_simple_test_rom(), |ppu: &Ppu| {});
+        let mut bus = Bus::new(tests::create_simple_test_rom(), |_ppu: &Ppu, _joypad: &mut Joypad| {});
         bus.mem_write(0x0800, 0xFF);
         assert_eq!(bus.mem_read(0x00), 0xFF);
         assert_eq!(bus.mem_read(0x1000), 0xFF);
